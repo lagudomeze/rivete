@@ -1,0 +1,45 @@
+[workspace]
+members = [
+    "crates/*",
+    "libs/*"
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.0.1"
+rust-version = "1.80"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+authors = ["ybiao"]
+repository = "https://github.com/lagudomeze/ioc"
+
+[workspace.dependencies]
+cfg-rs = { version = "0.4", features = ["full"] }
+env_logger = { version = "0.11" }
+tracing = { version = "0.1" }
+tracing-subscriber = { version = "0.3" }
+anyhow = "1"
+crossbeam-epoch = "0.9"
+log = "0.4"
+thiserror = "2"
+proc-macro2 = "1"
+quote = "1"
+serde = { version = "1" }
+serde_json = { version = "1" }
+toml = "0.8"
+poem = { version = "3" }
+poem-openapi = { version = "5" }
+prettyplease = { version = "0.2" }
+darling = { version = "0.20" }
+proc-macro-crate = { version = "3" }
+
+[workspace.dependencies.syn]
+version = "2"
+features = [
+    "extra-traits",
+    "derive",
+    "parsing",
+    "printing",
+    "clone-impls",
+    "proc-macro",
+]
