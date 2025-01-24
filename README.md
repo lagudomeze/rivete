@@ -1,93 +1,57 @@
-Here's a simplified README focusing on your core requirements:
+# Rivete
 
-```markdown
-# Rivet (Experimental)
+## Introduction
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
+Rivete, inspired by the word "Rivet," symbolizes the solid connections made possible through Dependency Injection (DI). The name aligns with the core concept of Inversion of Control (IoC) and features a natural extension with `.rs` for Rust projects. Although "Rivet" was already taken, "Rivete" preserves the essence while offering a unique identity.
 
-> **Rivet** - A compile-time dependency injection framework for Rust  
-> *Name inspired by mechanical fasteners - symbolizing secure component connections*
+Rivete aims to provide a lightweight, compile-time IoC framework for Rust, drawing inspiration from the simplicity and extensibility of Spring Boot. The framework is currently in its early stages (version 0.0.1).
 
-## Why Rivet?
-- **Zero-cost abstractions** through compile-time magic
-- **Spring Boot inspired** DI concepts in Rust-native style
-- **No runtime overhead** - All wiring happens during compilation
+## Project Goals
+
+1. **Zero-Cost Abstraction**: Minimize runtime overhead and leverage Rust’s compile-time guarantees wherever possible.
+2. **Compile-Time Execution**: Use Rust’s metaprogramming capabilities to analyze and generate code at compile time.
+3. **Extensibility**: Offer a modular architecture to support features like MVC, scheduling, database integrations, declarative HTTP clients, and background task handling.
 
 ## Core Features
-- 🛠️ **Compile-time component scanning** using Rust's module system
-- 🔒 **Safe initialization markers** (`Inited<T>` proof)
-- 📦 **Type registry** built via procedural macros
-- 🧵 **Thread-safe static access** without locks/atomic
 
-## Design Goals
-```rust
-// Zero-cost initialization proof
-struct Inited<T>(PhantomData<T>);
+### Static Initialization
 
-// Type registry (compile-time generated)
-static REGISTRY: Registry = {
-    let mut m = HashMap::new();
-    // Generated during macro expansion
-    m.insert(TypeId::of::<MyBean>(), init_my_bean);
-    m
-};
-```
+- Implements a system akin to `OnceLock` but ensures as much zero-cost access to initialized static values as possible.
+- Guarantees safety for accessing initialized values with compile-time verification using an `Inited` marker.
+- During IoC container initialization, a `Map<TypeId, Inited>` ensures each bean is initialized exactly once.
+- After initialization, lightweight markers (cloneable, copyable, thread-safe, and zero-sized) indicate ready-to-use components.
 
-## How It Works
-1. **Component Scanning**  
-   Procedural macro scans crate/modules using `syn`:
-   ```rust
-   #[rivet::bean]
-   struct Database {
-       url: String
-   }
-   ```
+### Compile-Time Bean Discovery
 
-2. **Compile-Time Registry**  
-   Generates initialization map:
-   ```rust
-   type InitFn = fn() -> Inited<dyn Any>;
-   
-   struct Registry {
-       beans: HashMap<TypeId, InitFn>,
-   }
-   ```
+- Leverages the `syn` crate to scan all code within the crate during compilation.
+- Automatically detects and registers beans based on Rust’s module system.
+- Constructs initialization functions or types for discovered beans.
 
-3. **Safe Access**  
-   Runtime access with initialization guarantee:
-   ```rust
-   let db: &Database = rivet::get::<Database>().expect("Bean initialized");
-   ```
+### Extensibility
 
-## Roadmap
-- **MVC Extension**  
-  Auto-collect HTTP handlers from annotations
-- **Scheduled Tasks**  
-  Cron-like syntax with compile-time validation
-- **DB Mapper**  
-  Type-safe SQL via procedural macros
-- **Declarative HTTP Client**  
-  Feign-style interface definitions
+- Modular system supports additional features, including:
+  - **MVC**: Automatically collect and register HTTP interfaces.
+  - **Scheduling**: Simplify task scheduling with declarative annotations.
+  - **Database Integration**: Provide wrappers similar to MyBatis for seamless data access.
+  - **Declarative HTTP Clients**: Inspired by Feign, define HTTP clients declaratively.
+  - **Background Processing**: Handle Kafka consumers and similar asynchronous tasks with ease.
 
-## Limitations (0.0.1)
-- Single-threaded initialization only
-- Basic type registry (no dependency ordering)
-- Manual component scan registration
+## Getting Started
 
-## Contribution
-Found a bug? Want a feature? Open an issue!  
-*See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.*
+This project is under active development. The current version (0.0.1) focuses on laying the groundwork for the IoC container and static initialization system.
+
+To contribute or explore the codebase:
+
+1. Clone the repository.
+2. Experiment with defining beans and initializing the IoC container.
+3. Share feedback or request new features by opening an issue.
+
+## Future Plans
+
+- Enhance documentation with detailed usage examples.
+- Implement advanced features like scheduling, MVC support, and declarative HTTP clients.
+- Build a vibrant community around Rivete for collaborative development.
 
 ---
 
-> **Warning**: Experimental prototype - Not production ready  
-> Current focus: Prove core zero-cost DI concept
-```
-
-Key implementation notes:
-1. `Inited<T>` acts as zero-sized initialization proof
-2. Type registry uses `TypeId` as key with generated init functions
-3. Procedural macro generates registry population code during compilation
-4. Static access uses Rust's type system instead of runtime checks
-
-Would you like me to elaborate on any specific aspect of the implementation?
+For questions, contributions, or feature requests, please open an issue on the project repository. Together, let’s make Rivete a powerful, as much zero-cost IoC framework for Rust!
