@@ -2,176 +2,369 @@ use std::cell::UnsafeCell;
 use std::marker::PhantomData;
 use std::mem::MaybeUninit;
 
-/// A label for types that can only have a single instance.
+/// A marker trait for types that can only have a single instance, representing the boot stage token.
+///
+/// This trait is used to enforce a linear lifecycle: booting → living → outliving.
+/// A `Booting` instance serves as a unique token that controls access to associated `StaticSlot`s.
+///
 /// # Safety
-/// It is unsafe to implement this trait because it is a marker trait.
-/// Users must ensure that the type they are implementing this trait for can only have a single instance.  
-/// In most cases, you should use a static [`Once`](std::sync::Once) to ensure that the type is only initialized once.  For example:
+///
+/// Implementing this trait is unsafe because it requires the following guarantees:
+///
+/// 1. **Singleton guarantee**: The implementing type must have at most one instance at any time.
+///    Typically, this is enforced using a static `Once` or similar synchronization primitive.
+///
+/// 2. **Lifetime dominance**: The single instance must outlive all uses of `StaticSlot` methods
+///    that take references to it (`uninit`, `mut_deref`, `deref`, `drop_in_place`).
+///
+/// 3. **Linear lifecycle**: The instance must follow the sequence:
+///    - Created once during boot phase
+///    - Used to initialize `StaticSlot`s via `uninit`
+///    - Converted to `Living` via `assume_booted` (consuming the instance)
+///    - Eventually converted to `Outliving` via `outlive` (consuming the `Living`)
+///    - Dropped after all `StaticSlot`s are destroyed
+///
+/// 4. **Exclusive access**: While a `Booting` instance exists (as `&mut C`), no other references
+///    to the same `StaticSlot`s may exist. The instance serves as proof of exclusive access.
+///
+/// 5. **Proper initialization**: Before transitioning to `Living`, all `StaticSlot`s that will be
+///    accessed must be initialized via `uninit().write(...)`.
+///
+/// # Example
+///
 /// ```rust
 /// use std::sync::Once;
+/// use lifecycle::Booting;
 ///
-/// use lifecycle::Singleton;
-///
-/// pub struct A {
-///   _private: ()
+/// pub struct BootToken {
+///     _private: ()
 /// }
 ///
-/// impl A {
-///  pub fn new() -> Self {
-///    static ONCE: Once = Once::new();
-///
-///    let mut result = None;
-///
-///    ONCE.call_once(|| {
-///      result = Some(A { _private: () });
-///    });
-///
-///    result.unwrap()
-///  }
+/// impl BootToken {
+///     pub fn new() -> Self {
+///         static ONCE: Once = Once::new();
+///         let mut result = None;
+///         ONCE.call_once(|| {
+///             result = Some(BootToken { _private: () });
+///         });
+///         result.unwrap()
+///     }
 /// }
 ///
 /// /// # Safety
-/// /// This is safe because A can only be initialized once.
-/// unsafe impl Singleton for A {}
+/// /// - `BootToken::new()` uses `Once` to guarantee at most one instance
+/// /// - The instance controls access to associated `StaticSlot`s
+/// /// - The lifecycle follows boot → living → outliving sequence
+/// unsafe impl Booting for BootToken {}
 /// ```
-pub unsafe trait Singleton {}
+pub unsafe trait Booting {}
 
-/// # Safety
-/// This is unsafe because the caller must ensure:
-/// 1. The Booting is Singleton
-/// 2. You can only create Living from Living::assume_booted
-/// 3. You can only create Outliving from Living::outliving
-pub trait Living {
-    type Booting: Singleton;
-
-    unsafe fn assume_booted(from: Self::Booting) -> Self;
-
-    type Outliving;
-
-    fn outliving(self) -> Self::Outliving;
+/// Error type for lifecycle operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LifecycleError {
+    /// The lifecycle instance has already been initialized.
+    AlreadyInitialized,
 }
 
-/// # Safety
-/// This is safe because any type that implements Living can only be created from a Booting instance, which is Singleton.
-unsafe impl<T> Singleton for T where T: Living {}
-
-pub struct StaticSlot<T, L> {
-    slot: UnsafeCell<MaybeUninit<T>>,
-    life: PhantomData<L>,
-}
-
-unsafe impl<T, L> Send for StaticSlot<T, L>
-where
-    T: Send,
-    L: Send,
-{
-}
-
-unsafe impl<T, L> Sync for StaticSlot<T, L>
-where
-    T: Send,
-    L: Send,
-{
-}
-
-impl<T, L> StaticSlot<T, L> {
-    pub const fn new() -> Self {
-        StaticSlot {
-            slot: UnsafeCell::new(MaybeUninit::uninit()),
-            life: PhantomData,
+impl std::fmt::Display for LifecycleError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LifecycleError::AlreadyInitialized => {
+                write!(f, "lifecycle instance already initialized")
+            }
         }
     }
 }
 
-impl<T, L: Living> StaticSlot<T, L> {
+impl std::error::Error for LifecycleError {}
+
+#[derive(Debug)]
+pub struct Living<C: Booting> {
+    _marker: PhantomData<C>,
+}
+
+impl<C: Booting> Living<C> {
     /// # Safety
-    /// This is safe because the `Booting` instance is Singleton, so you can not create multiple mutable references to the same `StaticSlot`.
-    pub fn uninit<'a>(&'static self, _: &'a mut L::Booting) -> &'a mut MaybeUninit<T> {
+    ///
+    /// The caller must guarantee the following:
+    ///
+    /// 1. **Boot completion**: All boot steps are completed, meaning:
+    ///    - All `StaticSlot`s that will be accessed have been initialized via `uninit().write(...)`
+    ///    - No further initialization of `StaticSlot`s will occur
+    ///
+    /// 2. **Exclusive ownership**: The `booted` instance is the sole owner of all associated `StaticSlot`s.
+    ///    No other references (shared or mutable) to any `StaticSlot` exist.
+    ///
+    /// 3. **Linear transition**: This method consumes the `Booting` instance, transitioning from boot phase
+    ///    to living phase. After this call, the `Booting` instance no longer exists.
+    ///
+    /// 4. **Singleton validity**: The `booted` instance must be the unique singleton of type `C`,
+    ///    as guaranteed by the `Booting` trait implementation.
+    pub unsafe fn assume_booted(_booted: C) -> Self {
+        Self {
+            _marker: PhantomData,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct Outliving<C: Booting> {
+    _marker: PhantomData<C>,
+}
+
+impl<C: Booting> Outliving<C> {
+    pub fn outlive(_living: Living<C>) -> Self {
+        Self {
+            _marker: PhantomData,
+        }
+    }
+}
+
+pub struct StaticSlot<T, C: Booting> {
+    slot: UnsafeCell<MaybeUninit<T>>,
+    category: PhantomData<C>,
+}
+
+unsafe impl<T, C> Send for StaticSlot<T, C>
+where
+    T: Send,
+    C: Booting + Send,
+{
+}
+
+unsafe impl<T, C> Sync for StaticSlot<T, C>
+where
+    T: Send + Sync,
+    C: Booting + Sync,
+{
+}
+
+impl<T, C> StaticSlot<T, C>
+where
+    C: Booting,
+{
+    pub const fn new() -> Self {
+        Self {
+            slot: UnsafeCell::new(MaybeUninit::uninit()),
+            category: PhantomData,
+        }
+    }
+}
+
+impl<T, C> Default for StaticSlot<T, C>
+where
+    C: Booting,
+{
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<T, C> StaticSlot<T, C>
+where
+    C: Booting,
+{
+    /// Returns a mutable reference to the uninitialized slot for writing.
+    ///
+    /// # Safety
+    ///
+    /// This method is safe because all necessary guarantees are enforced by the type system:
+    ///
+    /// 1. **Exclusive boot phase**: The `&mut C` parameter can only exist during the boot phase,
+    ///    before `assume_booted` is called. Since `assume_booted` consumes the `C` instance,
+    ///    it's impossible to obtain `&mut C` after boot phase, making calls after boot phase impossible.
+    ///
+    /// 2. **Singleton access**: The `C: Booting` bound guarantees that only one instance of type `C`
+    ///    exists. Combined with Rust's borrowing rules, this ensures that only one `&mut C` reference
+    ///    can exist at any time, preventing concurrent calls to `uninit` on the same `StaticSlot`.
+    ///
+    /// 3. **Single initialization**: While technically safe to call `write` multiple times on a
+    ///    `MaybeUninit<T>`, doing so may cause memory leaks if `T` implements `Drop`. However,
+    ///    this is a logical error rather than memory unsafety. The type system cannot prevent
+    ///    multiple writes, but the singleton nature of `C` makes it unlikely in practice.
+    ///
+    /// 4. **Lifetime connection**: The returned reference `&'a mut MaybeUninit<T>` is tied to the
+    ///    lifetime `'a` of the `&'a mut C` parameter, ensuring it cannot outlive the `Booting` instance.
+    ///
+    /// 5. **No overlapping mutable references**: Rust's borrowing rules guarantee that the `&mut C`
+    ///    is unique, and since all accesses to `StaticSlot`s go through this unique reference,
+    ///    multiple mutable references to the same slot cannot be created.
+    pub fn uninit<'a>(&'static self, _: &'a mut C) -> &'a mut MaybeUninit<T> {
         unsafe { &mut *self.slot.get() }
     }
 
+    /// Returns a mutable reference to the initialized value.
+    ///
     /// # Safety
-    /// This is safe because the `T` impl Living , it is Singleton, so you can not create multiple mutable references to the same `StaticSlot`.
-    /// Also, Living is an unsafe trait, so when you get a Living instance, you can be sure the slot is initialized.
+    ///
+    /// This method is safe because all necessary guarantees are enforced by the type system:
+    ///
+    /// 1. **Living phase**: The `&mut Living<C>` parameter can only exist during the living phase,
+    ///    after `assume_booted` has been called and before `outlive` is called. The `Living<C>`
+    ///    type serves as a proof token that boot phase is complete.
+    ///
+    /// 2. **Exclusive access**: Rust's borrowing rules guarantee that the `&mut Living<C>` reference
+    ///    is unique, providing exclusive access to all associated `StaticSlot`s. No other references
+    ///    (shared or mutable) to this `StaticSlot` can exist while this borrow is held.
+    ///
+    /// 3. **Proper initialization**: The `Living<C>` instance can only be created via `assume_booted`,
+    ///    which is `unsafe` and requires the caller to guarantee that all slots are initialized.
+    ///    Therefore, the existence of a `Living<C>` value proves initialization has occurred.
+    ///
+    /// 4. **Lifetime validity**: The returned reference's lifetime `'a` is tied to the
+    ///    `&mut Living<C>` borrow, ensuring it cannot outlive the borrow.
     #[inline(always)]
-    pub fn mut_deref<'a, 'b>(&'static self, _: &'a mut L) -> &'b mut T
-    where
-        'a: 'b,
-    {
+    pub fn mut_deref<'a>(&'static self, _: &'a mut Living<C>) -> &'a mut T {
         let ptr = self.slot.get();
         unsafe { (&mut *ptr).assume_init_mut() }
     }
 
+    /// Returns a shared reference to the initialized value.
+    ///
     /// # Safety
-    /// This is safe because the `L` impl Living , it is Singleton, so you can safely create references to the same `StaticSlot`.
-    /// Also, Living is an unsafe trait, so when you get a Living instance, you can be sure the slot is initialized.
+    ///
+    /// This method is safe because all necessary guarantees are enforced by the type system:
+    ///
+    /// 1. **Living phase**: The `&Living<C>` parameter can only exist during the living phase,
+    ///    after `assume_booted` has been called and before `outlive` is called. The `Living<C>`
+    ///    type serves as a proof token that boot phase is complete.
+    ///
+    /// 2. **No mutable aliases**: While a `&Living<C>` exists, a `&mut Living<C>` cannot exist
+    ///    due to Rust's borrowing rules. Since all mutable access to `StaticSlot`s requires
+    ///    `&mut Living<C>`, this guarantees no mutable references to the slot exist while
+    ///    the returned shared reference is alive.
+    ///
+    /// 3. **Proper initialization**: The `Living<C>` instance can only be created via `assume_booted`,
+    ///    which is `unsafe` and requires the caller to guarantee that all slots are initialized.
+    ///    Therefore, the existence of a `Living<C>` value proves initialization has occurred.
     #[inline(always)]
-    pub fn deref<'a>(&'static self, _: &'a L) -> &'a T {
+    pub fn deref<'a>(&'static self, _: &'a Living<C>) -> &'a T {
         let ptr = self.slot.get();
         unsafe { (&*ptr).assume_init_ref() }
     }
 
+    /// Drops the initialized value in place.
+    ///
     /// # Safety
-    /// This is safe because the `L` impl Living , it is Singleton, so Outliving is also Singleton. There is not any ref to this slot, so you call drop_in_place safely.
-    pub fn drop_in_place(&'static self, _: &L::Outliving) {
+    ///
+    /// The caller must guarantee:
+    ///
+    /// 1. **Single destruction**: The value in this slot must not have been already dropped.
+    ///    Calling `drop_in_place` multiple times on the same slot is undefined behavior.
+    ///
+    /// While the `Outliving<C>` instance proves that:
+    /// - The slot was properly initialized (via the chain `Outliving<C>` ← `Living<C>` ← `assume_booted`)
+    /// - No `&Living<C>` or `&mut Living<C>` references exist (living phase has ended)
+    ///
+    /// The type system cannot prevent obtaining multiple `&mut Outliving<C>` references through reborrowing,
+    /// which could lead to multiple calls to `drop_in_place`. Therefore this method is `unsafe`.
+    pub unsafe fn drop_in_place(&'static self, _: &mut Outliving<C>) {
         let ptr = self.slot.get();
         unsafe { (&mut *ptr).assume_init_drop() }
     }
 }
 
+/// Creates a new lifecycle type that automatically implements the `Booting` trait.
+///
+/// This macro generates a struct with a private field to prevent direct instantiation,
+/// a `new()` method that uses `Once` to guarantee singleton behavior, and an
+/// `unsafe impl Booting` for the type.
+///
+/// # Example
+///
+/// ```rust
+/// use lifecycle::lifecycle;
+///
+/// // Creates a `pub struct AppLifecycle { _private: () }` with singleton guarantees
+/// lifecycle!(AppLifecycle);
+///
+/// // Now you can use AppLifecycle as a Booting type:
+/// use lifecycle::StaticSlot;
+/// static COMPONENT: StaticSlot<usize, AppLifecycle> = StaticSlot::new();
+/// ```
+#[macro_export]
+macro_rules! lifecycle {
+    ($name:ident) => {
+        /// A lifecycle type created by the `lifecycle!` macro.
+        ///
+        /// This type implements the `Booting` trait with singleton guarantees
+        /// enforced by a static `Once`.
+        #[derive(Debug)]
+        pub struct $name {
+            _private: (),
+        }
+
+        impl $name {
+            /// Returns the singleton instance of this lifecycle type.
+            ///
+            /// This method uses a static `Once` to ensure that only one instance
+            /// is ever created, satisfying the singleton requirement of `Booting`.
+            /// Returns the singleton instance of this lifecycle type.
+            ///
+            /// This method uses a static `Once` to ensure that only one instance
+            /// is ever created, satisfying the singleton requirement of `Booting`.
+            ///
+            /// # Errors
+            ///
+            /// Returns `Err(LifecycleError::AlreadyInitialized)` if the lifecycle
+            /// instance has already been created.
+            pub fn new() -> Result<Self, $crate::LifecycleError> {
+                use std::sync::Once;
+
+                static ONCE: Once = Once::new();
+
+                let mut instance: Option<Self> = None;
+
+                ONCE.call_once(|| {
+                    instance = Some(Self { _private: () });
+                });
+
+                instance
+                    .take()
+                    .ok_or($crate::LifecycleError::AlreadyInitialized)
+            }
+        }
+
+        /// # Safety
+        /// This implementation is safe because:
+        /// - `$name::new()` uses `Once` to guarantee at most one instance
+        /// - The instance controls access to associated `StaticSlot`s
+        /// - The lifecycle follows boot → living → outliving sequence
+        unsafe impl $crate::Booting for $name {}
+    };
+}
+
 #[cfg(test)]
 mod tests {
-    use crate::{Singleton, StaticSlot};
+    use crate::{Booting, LifecycleError, StaticSlot};
     use std::sync::Once;
 
-    // #[singleton]
-    struct Bootstrap {
+    struct ComLifecycle {
         _private: (),
     }
-
-    struct Living {
-        _private: (),
-    }
-
-    struct Outliving {
-        _private: (),
-    }
-
-    impl Bootstrap {
-        fn new() -> Self {
+    impl ComLifecycle {
+        #[allow(static_mut_refs)]
+        fn new() -> Result<Self, LifecycleError> {
             static ONCE: Once = Once::new();
-
-            let mut ret = None;
+            let mut instance: Option<ComLifecycle> = None;
 
             ONCE.call_once(|| {
-                ret = Some(Self { _private: () });
+                instance = Some(ComLifecycle { _private: () });
             });
 
-            ret.unwrap()
+            instance
+                .take()
+                .ok_or(LifecycleError::AlreadyInitialized)
         }
     }
 
-    unsafe impl Singleton for Bootstrap {}
-
-    impl super::Living for Living {
-        type Booting = Bootstrap;
-
-        unsafe fn assume_booted(_: Self::Booting) -> Self {
-            Self { _private: () }
-        }
-
-        type Outliving = Outliving;
-
-        fn outliving(self) -> Self::Outliving {
-            Self::Outliving { _private: () }
-        }
-    }
+    unsafe impl Booting for ComLifecycle {}
 
     struct A(usize);
 
-    static SLOT: StaticSlot<A, Living> = StaticSlot::new();
+    static SLOT: StaticSlot<A, ComLifecycle> = StaticSlot::new();
 
-    static SLOT2: StaticSlot<A, Living> = StaticSlot::new();
+    static SLOT2: StaticSlot<A, ComLifecycle> = StaticSlot::new();
 
     struct C {
         a: A,
@@ -180,14 +373,14 @@ mod tests {
 
     #[test]
     fn it_works() {
-        let mut boot = Bootstrap::new();
+        let mut boot = ComLifecycle::new().unwrap();
         SLOT.uninit(&mut boot).write(A(42));
         SLOT2.uninit(&mut boot).write(A(12));
 
         let mut ctx = unsafe { crate::Living::assume_booted(boot) };
 
         {
-            SLOT.mut_deref(&mut ctx).0 =  SLOT2.mut_deref(&mut ctx).0 ;
+            SLOT.mut_deref(&mut ctx).0 = SLOT2.mut_deref(&mut ctx).0;
         }
 
         let mut c = C { a: A(42), b: A(12) };
@@ -197,5 +390,37 @@ mod tests {
             let b = &mut c.b;
             a.0 += b.0;
         }
+    }
+
+    #[test]
+    fn macro_creates_lifecycle_type() {
+        // Use the macro to create a new lifecycle type
+        lifecycle!(TestLifecycle);
+
+        // Verify the type implements Booting
+        let result = TestLifecycle::new();
+        assert!(result.is_ok());
+        let mut boot = result.unwrap();
+
+        // Create a static slot using the macro-generated type
+        static TEST_SLOT: StaticSlot<usize, TestLifecycle> = StaticSlot::new();
+
+        // Test the full lifecycle
+        TEST_SLOT.uninit(&mut boot).write(42);
+
+        let mut living = unsafe { crate::Living::assume_booted(boot) };
+
+        assert_eq!(*TEST_SLOT.deref(&living), 42);
+
+        *TEST_SLOT.mut_deref(&mut living) = 100;
+        assert_eq!(*TEST_SLOT.deref(&living), 100);
+
+        let mut outliving = crate::Outliving::outlive(living);
+
+        // Drop the value (in real usage, this would be called once per slot)
+        unsafe { TEST_SLOT.drop_in_place(&mut outliving) };
+
+        let result = TestLifecycle::new();
+        assert_eq!(result.unwrap_err(), LifecycleError::AlreadyInitialized);
     }
 }
