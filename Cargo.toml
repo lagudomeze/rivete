@@ -11,7 +11,6 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 authors = ["yubiao"]
 repository = "https://github.com/lagudomeze/rivete.git"
-rust-version = "1.85.0"
 
 [workspace.dependencies]
 cfg-rs = { version = "0.7", features = ["full"] }
