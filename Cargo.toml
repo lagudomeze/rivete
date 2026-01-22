@@ -11,16 +11,21 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 authors = ["yubiao"]
 repository = "https://github.com/lagudomeze/rivete.git"
+rust-version = "1.92.0"
 
 [workspace.dependencies]
+lifecycle = { path = "crates/lifecycle" }
+syn-gen = { path = "crates/syn-gen" }
+syn-scan = { path = "crates/syn-scan" }
 cfg-rs = { version = "0.7", features = ["full"] }
 env_logger = { version = "0.11" }
 tracing = { version = "0.1" }
 tracing-subscriber = { version = "0.3" }
-anyhow = "1"
 crossbeam-epoch = "0.9"
 log = "0.4"
 thiserror = "2"
+exn = "0.2"
+derive_more = { version = "2", features = ["full"] }
 proc-macro2 = "1"
 quote = "1"
 serde = { version = "1" }
@@ -29,7 +34,7 @@ toml = "0.9"
 poem = { version = "3" }
 poem-openapi = { version = "5" }
 prettyplease = { version = "0.2" }
-darling = { version = "0.2" }
+darling = { version = "0.23" }
 proc-macro-crate = { version = "3" }
 
 [workspace.dependencies.syn]

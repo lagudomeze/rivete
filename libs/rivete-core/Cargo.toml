@@ -8,3 +8,7 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
+lifecycle = { workspace = true }
+exn = { workspace = true }
+derive_more = { workspace = true }
+cfg-rs = { workspace = true }

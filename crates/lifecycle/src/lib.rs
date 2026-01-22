@@ -1,6 +1,5 @@
-use std::cell::UnsafeCell;
-use std::marker::PhantomData;
-use std::mem::MaybeUninit;
+use derive_more::{Display, Error};
+use std::{cell::UnsafeCell, marker::PhantomData, mem::MaybeUninit};
 
 /// A marker trait for types that can only have a single instance, representing the boot stage token.
 ///
@@ -57,33 +56,41 @@ use std::mem::MaybeUninit;
 /// /// - The lifecycle follows boot → living → outliving sequence
 /// unsafe impl Booting for BootToken {}
 /// ```
-pub unsafe trait Booting {}
+pub unsafe trait Mono {}
 
-/// Error type for lifecycle operations.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LifecycleError {
-    /// The lifecycle instance has already been initialized.
-    AlreadyInitialized,
+#[derive(Debug)]
+pub struct Booting<C> {
+    _marker: PhantomData<C>,
 }
 
-impl std::fmt::Display for LifecycleError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            LifecycleError::AlreadyInitialized => {
-                write!(f, "lifecycle instance already initialized")
-            }
+impl<C> Booting<C>
+where
+    C: Mono,
+{
+    pub fn new(_: C) -> Self {
+        Self {
+            _marker: PhantomData,
         }
     }
 }
 
-impl std::error::Error for LifecycleError {}
+/// Error type for lifecycle operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Display, Error)]
+pub enum LifecycleError {
+    /// The lifecycle instance has already been initialized.
+    #[display("Lifecycle instance has already been initialized")]
+    AlreadyInitialized,
+}
+
+/// Result type for lifecycle operations
+pub type Result<T> = exn::Result<T, LifecycleError>;
 
 #[derive(Debug)]
-pub struct Living<C: Booting> {
+pub struct Living<C> {
     _marker: PhantomData<C>,
 }
 
-impl<C: Booting> Living<C> {
+impl<C> Living<C> {
     /// # Safety
     ///
     /// The caller must guarantee the following:
@@ -100,7 +107,10 @@ impl<C: Booting> Living<C> {
     ///
     /// 4. **Singleton validity**: The `booted` instance must be the unique singleton of type `C`,
     ///    as guaranteed by the `Booting` trait implementation.
-    pub unsafe fn assume_booted(_booted: C) -> Self {
+    pub unsafe fn assume_booted(_booted: Booting<C>) -> Self
+    where
+        C: Mono,
+    {
         Self {
             _marker: PhantomData,
         }
@@ -108,11 +118,11 @@ impl<C: Booting> Living<C> {
 }
 
 #[derive(Debug)]
-pub struct Outliving<C: Booting> {
+pub struct Outliving<C> {
     _marker: PhantomData<C>,
 }
 
-impl<C: Booting> Outliving<C> {
+impl<C> Outliving<C> {
     pub fn outlive(_living: Living<C>) -> Self {
         Self {
             _marker: PhantomData,
@@ -120,7 +130,7 @@ impl<C: Booting> Outliving<C> {
     }
 }
 
-pub struct Slot<T, C: Booting> {
+pub struct Slot<T, C> {
     slot: UnsafeCell<MaybeUninit<T>>,
     category: PhantomData<C>,
 }
@@ -128,21 +138,18 @@ pub struct Slot<T, C: Booting> {
 unsafe impl<T, C> Send for Slot<T, C>
 where
     T: Send,
-    C: Booting + Send,
+    C: Send,
 {
 }
 
 unsafe impl<T, C> Sync for Slot<T, C>
 where
     T: Send + Sync,
-    C: Booting + Sync,
+    C: Sync,
 {
 }
 
-impl<T, C> Slot<T, C>
-where
-    C: Booting,
-{
+impl<T, C> Slot<T, C> {
     pub const fn new() -> Self {
         Self {
             slot: UnsafeCell::new(MaybeUninit::uninit()),
@@ -151,10 +158,7 @@ where
     }
 }
 
-impl<T, C> Default for Slot<T, C>
-where
-    C: Booting,
-{
+impl<T, C> Default for Slot<T, C> {
     fn default() -> Self {
         Self::new()
     }
@@ -162,7 +166,7 @@ where
 
 impl<T, C> Slot<T, C>
 where
-    C: Booting,
+    C: Mono,
 {
     /// Returns a mutable reference to the uninitialized slot for writing.
     ///
@@ -189,7 +193,7 @@ where
     /// 5. **No overlapping mutable references**: Rust's borrowing rules guarantee that the `&mut C`
     ///    is unique, and since all accesses to [`Slots`](Slot) go through this unique reference,
     ///    multiple mutable references to the same slot cannot be created.
-    pub fn uninit<'a>(&'static self, _: &'a mut C) -> &'a mut MaybeUninit<T> {
+    pub fn uninit<'a>(&'static self, _: &'a mut Booting<C>) -> &'a mut MaybeUninit<T> {
         unsafe { &mut *self.slot.get() }
     }
 
@@ -214,7 +218,7 @@ where
     /// 4. **Lifetime validity**: The returned reference's lifetime `'a` is tied to the
     ///    `&mut Living<C>` borrow, ensuring it cannot outlive the borrow.
     #[inline(always)]
-    pub fn mut_deref<'a>(&'static self, _: &'a mut Living<C>) -> &'a mut T {
+    pub fn deref_mut<'a>(&'static self, _: &'a mut Living<C>) -> &'a mut T {
         let ptr = self.slot.get();
         unsafe { (&mut *ptr).assume_init_mut() }
     }
@@ -283,7 +287,7 @@ where
 /// static COMPONENT: Slot<usize, AppLifecycle> = Slot::new();
 /// ```
 #[macro_export]
-macro_rules! lifecycle {
+macro_rules! mono {
     ($name:ident) => {
         /// A lifecycle type created by the `lifecycle!` macro.
         ///
@@ -308,7 +312,7 @@ macro_rules! lifecycle {
             ///
             /// Returns `Err(LifecycleError::AlreadyInitialized)` if the lifecycle
             /// instance has already been created.
-            pub fn new() -> Result<Self, $crate::LifecycleError> {
+            pub fn new() -> std::result::Result<$name, $crate::LifecycleError> {
                 use std::sync::Once;
 
                 static ONCE: Once = Once::new();
@@ -330,33 +334,15 @@ macro_rules! lifecycle {
         /// - `$name::new()` uses `Once` to guarantee at most one instance
         /// - The instance controls access to associated [`Slots`](Slot)
         /// - The lifecycle follows boot → living → outliving sequence
-        unsafe impl $crate::Booting for $name {}
+        unsafe impl $crate::Mono for $name {}
     };
 }
 
 #[cfg(test)]
 mod tests {
     use crate::{Booting, LifecycleError, Slot};
-    use std::sync::Once;
 
-    struct ComLifecycle {
-        _private: (),
-    }
-    impl ComLifecycle {
-        #[allow(static_mut_refs)]
-        fn new() -> Result<Self, LifecycleError> {
-            static ONCE: Once = Once::new();
-            let mut instance: Option<ComLifecycle> = None;
-
-            ONCE.call_once(|| {
-                instance = Some(ComLifecycle { _private: () });
-            });
-
-            instance.take().ok_or(LifecycleError::AlreadyInitialized)
-        }
-    }
-
-    unsafe impl Booting for ComLifecycle {}
+    mono!(ComLifecycle);
 
     struct A(usize);
 
@@ -371,14 +357,17 @@ mod tests {
 
     #[test]
     fn it_works() {
-        let mut boot = ComLifecycle::new().unwrap();
+        let l = ComLifecycle::new().unwrap();
+
+        let mut boot = Booting::new(l);
+
         SLOT.uninit(&mut boot).write(A(42));
         SLOT2.uninit(&mut boot).write(A(12));
 
         let mut ctx = unsafe { crate::Living::assume_booted(boot) };
 
         {
-            SLOT.mut_deref(&mut ctx).0 = SLOT2.mut_deref(&mut ctx).0;
+            SLOT.deref_mut(&mut ctx).0 = SLOT2.deref_mut(&mut ctx).0;
         }
 
         let mut c = C { a: A(42), b: A(12) };
@@ -393,12 +382,12 @@ mod tests {
     #[test]
     fn macro_creates_lifecycle_type() {
         // Use the macro to create a new lifecycle type
-        lifecycle!(TestLifecycle);
+        mono!(TestLifecycle);
 
         // Verify the type implements Booting
         let result = TestLifecycle::new();
         assert!(result.is_ok());
-        let mut boot = result.unwrap();
+        let mut boot = Booting::new(result.unwrap());
 
         // Create a static slot using the macro-generated type
         static TEST_SLOT: Slot<usize, TestLifecycle> = Slot::new();
@@ -410,7 +399,7 @@ mod tests {
 
         assert_eq!(*TEST_SLOT.deref(&living), 42);
 
-        *TEST_SLOT.mut_deref(&mut living) = 100;
+        *TEST_SLOT.deref_mut(&mut living) = 100;
         assert_eq!(*TEST_SLOT.deref(&living), 100);
 
         let mut outliving = crate::Outliving::outlive(living);
