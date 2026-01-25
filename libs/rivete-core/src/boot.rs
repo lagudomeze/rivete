@@ -1,8 +1,8 @@
 use crate::{
-    Result,
     config::{CfgSource, ConfigSource, IsConfig},
+    Result,
 };
-use lifecycle::{Booting, Living, Outliving, Slot, mono};
+use lifecycle::{mono, Booting, Living, Outliving, Slot};
 use std::{
     marker::PhantomData,
     ops::{Deref, DerefMut},
@@ -10,13 +10,23 @@ use std::{
 
 mono!(Ioc);
 
+/// Bootstrap context for initializing beans during the booting phase.
+///
+/// This struct holds the [`Booting<Ioc>`] context and configuration source,
+/// allowing beans to be initialized and providing access to configuration.
 #[derive(Debug)]
-pub struct InitCtx {
+pub struct Bootstrap {
     booting: Booting<Ioc>,
     config: CfgSource,
 }
 
-impl InitCtx {
+impl Bootstrap {
+    /// Creates a new bootstrap context.
+    ///
+    /// # Arguments
+    ///
+    /// * `ioc` - The I/O controller instance.
+    /// * `config` - Configuration source for beans.
     pub fn new(ioc: Ioc, config: CfgSource) -> Self {
         Self {
             booting: Booting::new(ioc),
@@ -24,12 +34,16 @@ impl InitCtx {
         }
     }
 
+    /// Completes the booting phase and transitions to the active phase.
+    ///
+    /// This consumes the bootstrap context and returns a [`Living<Ioc>`] instance,
+    /// which represents the active runtime phase.
     pub fn complete(self) -> Living<Ioc> {
         unsafe { Living::assume_booted(self.booting) }
     }
 }
 
-impl ConfigSource for InitCtx {
+impl ConfigSource for Bootstrap {
     fn get_config<T: IsConfig>(&self, key: impl AsRef<str>) -> Result<T> {
         self.config.get_config(key)
     }
@@ -38,7 +52,7 @@ impl ConfigSource for InitCtx {
     }
 }
 
-impl Deref for InitCtx {
+impl Deref for Bootstrap {
     type Target = Booting<Ioc>;
 
     fn deref(&self) -> &Self::Target {
@@ -46,7 +60,7 @@ impl Deref for InitCtx {
     }
 }
 
-impl DerefMut for InitCtx {
+impl DerefMut for Bootstrap {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.booting
     }
@@ -66,7 +80,7 @@ impl<T> Clone for Inited<T> {
 
 impl<K> Inited<K>
 where
-    K: Init,
+    K: Bean,
 {
     pub fn get<'a>(&self, living: &'a Living<Ioc>) -> &'a K::Bean {
         K::PLACE.deref(living)
@@ -76,31 +90,44 @@ where
         K::PLACE.deref_mut(living)
     }
 
-    /// Deinitializes the bean during the [`DropPhase`].
+    /// Deinitializes the bean during the drop phase.
+    ///
     /// # Safety
-    /// The caller must ensure calling this method only once for type [K] (This means you can only call once this method even if InitWitness<[K]> may have many instance).
-    /// # tips
-    /// InitWitness mean it has been initialized, so there is no free uninitialized problem.
+    ///
+    /// The caller must ensure calling this method only once for type `K`
+    /// (even though there may be multiple `Inited<K>` instances).
+    ///
+    /// # Note
+    ///
+    /// `Inited<K>` guarantees that the bean has been initialized,
+    /// so there is no risk of accessing uninitialized memory.
     pub unsafe fn drop_in_place(self, outliving: &mut Outliving<Ioc>) {
         unsafe { K::PLACE.drop_in_place(outliving) }
     }
 }
 
-/// A trait for types that can be initialized during the [`InitPhase`].
+/// A trait for types that can be initialized during the booting phase ([`Booting<Ioc>`]).
+///
 /// Implementors must provide a static storage location for the type,
 /// as well as a method to construct an instance of the type.
+///
 /// # Safety
-/// Duplicate initialization of the same place is safe, but may cause memory leak (In rust leak is not memory unsafe),
-/// but you better not do that.
-/// When init called we get InitWitness, which can be cloned and spread around freely,
-/// but to access the bean inside, we also need the [`token`](ActivePhase) instance, which is only create from InitPhase,
-/// so the lifetime of the bean is tied to the InitPhase/ActivePhase, which is safe.
-pub trait Init {
+///
+/// Duplicate initialization of the same storage location is safe but may cause memory leaks
+/// (memory leaks are not considered unsafe in Rust). However, it is recommended to avoid
+/// duplicate initialization.
+///
+/// When [`init`](Bean::init) is called, it returns an [`Inited<Self>`] witness that can be
+/// cloned and shared freely. However, to access the bean, a [`Living<Ioc>`] instance is
+/// required, which is only available after transitioning from the booting phase to the
+/// active phase. This ensures the bean's lifetime is tied to the active phase, guaranteeing
+/// safety.
+pub trait Bean {
     const PLACE: &'static Slot<Self::Bean, Ioc>;
     type Bean: 'static + Sized;
 
     #[inline(always)]
-    fn init(ctx: &mut InitCtx) -> Result<Inited<Self>>
+    fn init(ctx: &mut Bootstrap) -> Result<Inited<Self>>
     where
         Self: Sized,
     {
@@ -108,14 +135,19 @@ pub trait Init {
 
         Self::PLACE.uninit(&mut ctx.booting).write(bean);
 
-        // SAFETY: Although we may have multiple InitWitness created for same type,
-        // but to access the bean, we also need &Token (for shared access) or &mut Token (for mutable access)
-        // so the lifetime of the bean is same as the Token (its mean safe),
-        // and the InitWitness can be cloned freely and spread around.
+        // SAFETY: Although multiple `Inited<Self>` witnesses may be created for the same type,
+        // accessing the bean requires a `&Living<Ioc>` (for shared access) or `&mut Living<Ioc>`
+        // (for mutable access). This ties the bean's lifetime to the active phase, ensuring safety.
+        // The `Inited<Self>` witness can be cloned and shared freely.
         Ok(Inited(PhantomData))
     }
 
-    fn construct(ctx: &mut InitCtx) -> Result<Self::Bean>;
+    /// Constructs an instance of the bean.
+    ///
+    /// This method is called during initialization to create the bean instance.
+    /// The provided [`Bootstrap`] context can be used to access configuration
+    /// and other beans that have already been initialized.
+    fn construct(ctx: &mut Bootstrap) -> Result<Self::Bean>;
 }
 
 #[cfg(test)]
@@ -131,12 +163,12 @@ mod tests {
     }
     static STORAGE: Slot<TestStruct, Ioc> = Slot::new();
 
-    impl Init for TestStruct {
+    impl Bean for TestStruct {
         const PLACE: &'static Slot<TestStruct, Ioc> = &STORAGE;
 
         type Bean = TestStruct;
 
-        fn construct(_: &mut InitCtx) -> Result<Self::Bean> {
+        fn construct(_: &mut Bootstrap) -> Result<Self::Bean> {
             Ok(TestStruct(42, "Hello".to_string(), "world"))
         }
     }
@@ -145,7 +177,7 @@ mod tests {
     fn lifecycle_management() {
         let ioc = Ioc::new().expect("should create ioc");
 
-        let mut init_ctx = InitCtx::new(
+        let mut init_ctx = Bootstrap::new(
             ioc,
             CfgSource::new(Default::default()).expect("should create config source"),
         );

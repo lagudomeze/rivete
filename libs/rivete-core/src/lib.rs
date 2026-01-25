@@ -1,14 +1,17 @@
 extern crate core;
 
 use crate::{
-    init::{Init, InitCtx, Inited},
+    boot::{Bean, Bootstrap, Inited},
 };
 use std::mem::ManuallyDrop;
 use std::ops::{Deref, DerefMut};
+use lifecycle::Booting;
+use crate::boot::Ioc;
 
 pub mod config;
 pub mod error;
-pub mod init;
+pub mod boot;
+mod module;
 
 pub type Result<T> = exn::Result<T, error::Error>;
 
@@ -27,11 +30,11 @@ pub trait WithInited<C> {
 }
 
 pub trait Module {
-    unsafe fn build(ctx: &mut InitCtx) -> Result<Self>
+    fn build(ctx: &mut Booting<Ioc>) -> Result<Self>
     where
         Self: Sized;
 
-    fn init(mut ctx: InitCtx) -> Result<Context<Self>>
+    fn init(mut ctx: Booting<Ioc>) -> Result<Context<Self>>
     where
         Self: Sized,
     {
@@ -42,7 +45,7 @@ pub trait Module {
         })
     }
 
-    fn drop_in_place(self, phase: &mut DropPhase);
+    unsafe fn drop_in_place(self, phase: &mut );
 }
 
 pub struct Context<M: Module> {
@@ -55,7 +58,7 @@ where
 {
     pub fn get<K>(&self) -> &K::Bean
     where
-        K: WithInited<M> + Init,
+        K: WithInited<M> + Bean,
     {
         let (module, phase) = self.inner.deref();
         <K as WithInited<M>>::witness(module).get(phase)
@@ -63,7 +66,7 @@ where
 
     pub fn get_mut<K>(&mut self) -> &mut K::Bean
     where
-        K: WithInited<M> + Init,
+        K: WithInited<M> + Bean,
     {
         let (module, phase) = self.inner.deref_mut();
         <K as WithInited<M>>::witness(module).get_mut(phase)
